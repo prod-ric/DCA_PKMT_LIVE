@@ -1,0 +1,11 @@
+# ============================================
+# FILE: requirements.txt (UPDATED)
+# ============================================
+
+# Core dependencies
+python-dotenv
+websockets
+
+# Data processing
+pandas
+pyarrow
