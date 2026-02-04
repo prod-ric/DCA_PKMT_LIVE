@@ -1,5 +1,3 @@
-
-
 import json
 import os
 from pathlib import Path
@@ -20,27 +18,22 @@ def extract_market_info(json_file: Path) -> Optional[Dict[str, Any]]:
         with open(json_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
-        # Get the title from top level
         title = data.get('title')
         if not title:
             print(f"⚠️  {json_file.name}: No 'title' field found")
             return None
         
-        # Get startDate and endDate from top level
         start_date = data.get('startDate')
         end_date = data.get('endDate')
-        
-        # Get markets array
+
         markets = data.get('markets', [])
         if not markets:
             print(f"⚠️  {json_file.name}: No 'markets' array found")
             return None
         
-        # Find market where question matches title
         matching_market = None
         for market in markets:
-            question = market.get('question')
-            if question == title:
+            if market.get('question') == title:
                 matching_market = market
                 break
         
@@ -48,19 +41,16 @@ def extract_market_info(json_file: Path) -> Optional[Dict[str, Any]]:
             print(f"⚠️  {json_file.name}: No market found with question matching title '{title}'")
             return None
         
-        # Extract conditionId (market_id)
         condition_id = matching_market.get('conditionId')
         if not condition_id:
             print(f"⚠️  {json_file.name}: No 'conditionId' field found in matching market")
             return None
         
-        # Extract clobTokenIds
         clob_token_ids_str = matching_market.get('clobTokenIds')
         if not clob_token_ids_str:
             print(f"⚠️  {json_file.name}: No 'clobTokenIds' field found in matching market")
             return None
         
-        # Parse clobTokenIds (it's stored as a JSON string)
         try:
             clob_token_ids = json.loads(clob_token_ids_str)
             if len(clob_token_ids) != 2:
@@ -88,44 +78,24 @@ def extract_market_info(json_file: Path) -> Optional[Dict[str, Any]]:
 
 
 def extract_clob_token_ids(json_file: Path) -> Optional[List[str]]:
-    """
-    Extract clobTokenIds from a JSON file (legacy function for compatibility)
-    
-    Args:
-        json_file: Path to the JSON file
-        
-    Returns:
-        List of clobTokenIds if found, None otherwise
-    """
     info = extract_market_info(json_file)
     return info['clobTokenIds'] if info else None
 
 
 def update_config_file(market_data: Dict[str, Dict[str, Any]], config_path: str = "config.py"):
-    """
-    Update config.py with market information extracted from JSON files
-    
-    Args:
-        market_data: Dictionary mapping filename to market info dict
-        config_path: Path to config.py file
-    """
     config_file = Path(config_path)
     if not config_file.exists():
         print(f"⚠️  Config file '{config_path}' not found, skipping update")
         return
     
-    # Read current config
     with open(config_file, 'r', encoding='utf-8') as f:
         config_content = f.read()
     
-    # Build new MARKETS dictionary
     markets_dict = {}
     for idx, (filename, info) in enumerate(sorted(market_data.items()), 1):
         market_key = f'market_{idx}'
-        # Use filename without extension as base name, or title if available
         name = info.get('title', filename.replace('.json', ''))
         
-        # Determine YES and NO asset IDs (typically first is YES, second is NO)
         clob_ids = info['clobTokenIds']
         yes_asset = clob_ids[0]
         no_asset = clob_ids[1]
@@ -141,74 +111,53 @@ def update_config_file(market_data: Dict[str, Dict[str, Any]], config_path: str 
             'endDate': info.get('endDate'),
         }
     
-    # Generate the MARKETS dictionary as a string
     markets_str = "MARKETS = {\n"
     for market_key, market in markets_dict.items():
-        market_id = market['market_id']
-        name = market['name']
-        yes_id = market['assets']['YES']
-        no_id = market['assets']['NO']
-        start_date = market.get('startDate')
-        end_date = market.get('endDate')
-        
-        markets_str += f"    '{market_key}': " + "{\n"
-        markets_str += f"        'market_id': '{market_id}',\n"
-        markets_str += f"        'name': {repr(name)},\n"
-        markets_str += "        'assets': " + "{\n"
-        markets_str += f"            'YES': '{yes_id}',\n"
-        markets_str += f"            'NO':  '{no_id}',\n"
+        markets_str += f"    '{market_key}': {{\n"
+        markets_str += f"        'market_id': '{market['market_id']}',\n"
+        markets_str += f"        'name': {repr(market['name'])},\n"
+        markets_str += "        'assets': {\n"
+        markets_str += f"            'YES': '{market['assets']['YES']}',\n"
+        markets_str += f"            'NO':  '{market['assets']['NO']}',\n"
         markets_str += "        },\n"
-        markets_str += f"        'startDate': {repr(start_date)},\n"
-        markets_str += f"        'endDate': {repr(end_date)},\n"
+        markets_str += f"        'startDate': {repr(market['startDate'])},\n"
+        markets_str += f"        'endDate': {repr(market['endDate'])},\n"
         markets_str += "    },\n"
     markets_str += "    # Add more markets as needed\n"
     markets_str += "}\n"
     
-    # Find and replace the MARKETS section in config.py
-    import re
-    
-    # Find the MARKETS section by looking for MARKETS = { and matching braces
-    # Preserve the comment section above MARKETS
     lines = config_content.split('\n')
     new_lines = []
     skip_until_brace = False
     brace_count = 0
     found_markets = False
-    preserve_comment = True
     comment_lines = []
     
     for i, line in enumerate(lines):
         if 'MARKETS = {' in line and not found_markets:
-            # Check if there's a comment section before MARKETS
-            # Look backwards for comment lines
             j = i - 1
             while j >= 0 and (lines[j].strip().startswith('#') or lines[j].strip() == ''):
                 comment_lines.insert(0, lines[j])
                 j -= 1
             
-            # Add preserved comments
             if comment_lines:
                 new_lines.extend(comment_lines)
             
-            # Insert the new MARKETS dictionary
             new_lines.append(markets_str.rstrip())
             skip_until_brace = True
             brace_count = line.count('{') - line.count('}')
             found_markets = True
             continue
         elif skip_until_brace:
-            # Count braces to know when we're done with the MARKETS dict
             brace_count += line.count('{') - line.count('}')
             if brace_count == 0:
                 skip_until_brace = False
-            # Skip this line (it's part of the old MARKETS dict)
             continue
         else:
             new_lines.append(line)
     
     config_content = '\n'.join(new_lines)
     
-    # Write updated config
     with open(config_file, 'w', encoding='utf-8') as f:
         f.write(config_content)
     
@@ -218,22 +167,13 @@ def update_config_file(market_data: Dict[str, Dict[str, Any]], config_path: str 
 
 
 def process_all_markets(markets_dir: str = "markets", output_file: str = "clob_token_ids_by_file.json"):
-    """
-    Process all JSON files in the markets directory
-    
-    Args:
-        markets_dir: Directory containing market JSON files
-        output_file: Output JSON file to save results
-    """
     markets_path = Path(markets_dir)
     print(markets_path)
 
-    
     if not markets_path.exists():
         print(f"❌ Directory '{markets_dir}' does not exist")
         return
 
-    # Get all JSON files
     json_files = sorted(markets_path.glob("*.json"))
     print(sorted(markets_path.glob("*")))
 
@@ -245,9 +185,8 @@ def process_all_markets(markets_dir: str = "markets", output_file: str = "clob_t
     print("=" * 80)
     print()
     
-    # Process each file
     results = {}
-    market_data = {}  # Store full market info for config update
+    market_data = {}
     
     for json_file in json_files:
         print(f"Processing: {json_file.name}")
@@ -257,11 +196,14 @@ def process_all_markets(markets_dir: str = "markets", output_file: str = "clob_t
             clob_token_ids = market_info['clobTokenIds']
             results[json_file.name] = {
                 'clobTokenIds': clob_token_ids,
+                'conditionId': market_info['conditionId'],
                 'count': len(clob_token_ids)
             }
             market_data[json_file.name] = market_info
+
             print(f"  ✓ Found {len(clob_token_ids)} clobTokenIds: {clob_token_ids}")
             print(f"  ✓ Market ID: {market_info['conditionId']}")
+            print(f"  ✓ YES/NO Assets: {clob_token_ids} (Condition ID: {market_info['conditionId']})")
             print(f"  ✓ Title: {market_info['title']}")
             print(f"  ✓ Start Date: {market_info.get('startDate', 'N/A')}")
             print(f"  ✓ End Date: {market_info.get('endDate', 'N/A')}")
@@ -270,14 +212,12 @@ def process_all_markets(markets_dir: str = "markets", output_file: str = "clob_t
             print(f"  ✗ No market info extracted")
         print()
     
-    # Save results to JSON file
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     
     print("=" * 80)
     print(f"Results saved to: {output_file}")
     
-    # Print summary
     successful = sum(1 for v in results.values() if v is not None)
     failed = len(results) - successful
     
@@ -286,17 +226,15 @@ def process_all_markets(markets_dir: str = "markets", output_file: str = "clob_t
     print(f"  Successful: {successful}")
     print(f"  Failed: {failed}")
     
-    # Print all clobTokenIds in order
     print("\n" + "=" * 80)
     print("CLOB TOKEN IDs BY FILE (in order):")
     print("=" * 80)
     for filename, data in results.items():
         if data:
-            print(f"{filename}: {data['clobTokenIds']}")
+            print(f"{filename}: {data['clobTokenIds']} ({data['conditionId']}) \n ")
         else:
             print(f"{filename}: None")
     
-    # Collect all unique clobTokenIds
     all_token_ids = []
     for data in results.values():
         if data and data.get('clobTokenIds'):
@@ -310,16 +248,12 @@ def process_all_markets(markets_dir: str = "markets", output_file: str = "clob_t
     print(unique_token_ids)
     print(f"\nTotal unique token IDs: {len(unique_token_ids)}")
     
-    # Update config.py if we have market data
     if market_data:
         update_config_file(market_data)
 
 
 if __name__ == "__main__":
     import sys
-    
-    # Allow custom markets directory
- 
     markets_dir = "data_markets/"
     output_file = sys.argv[2] if len(sys.argv) > 2 else "clob_token_ids_by_file.json"
     
