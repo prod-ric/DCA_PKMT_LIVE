@@ -61,7 +61,7 @@ from live.config import (
     MAX_SPREAD_FOR_SL,
     SL_CONFIRMATION_TICKS,
 )
-from live.position_tracker import PositionTracker, MarketState, Trade
+from live.position_tracker import PositionTracker, MarketState, Trade, Position
 from live.orderbook_feed import OrderbookTick
 
 logger = logging.getLogger(__name__)
@@ -320,9 +320,24 @@ class LiveStrategy:
                     if amt <= 1:
                         continue
 
+                    # Log orderbook state before execution
+                    logger.info(f"💰 Executing BUY for {ms.name or mid[:20]} | "
+                               f"Amount: ${amt:.2f} | "
+                               f"Best ask: ${best_ask:.4f} | "
+                               f"Ask levels: {len(asks) if asks else 0} | "
+                               f"Bid levels: {len(bids) if bids else 0}")
+                    if asks and len(asks) > 0:
+                        logger.info(f"   First 3 asks: {asks[:3]}")
+                    else:
+                        logger.warning(f"⚠️  NO ASK LEVELS AVAILABLE for execution!")
+
                     shares, cost, avg_p = self._exec_buy(aid, amt, asks, best_ask)
                     if shares > 0:
                         pos = ms.get_position(aid)
+                        
+                        # Capture orderbook snapshot on first buy
+                        self._capture_entry_orderbook(pos, ts, best_bid, best_ask, bids, asks)
+                        
                         pos.shares += shares
                         pos.cost += cost
                         pos.update_avg()
@@ -400,6 +415,43 @@ class LiveStrategy:
             return self.order_mgr.execute_sell(asset_id, shares, best_bid=best_bid, bids=bids)
         else:
             return self.order_mgr.execute_sell(bids, shares)
+    
+    def _capture_entry_orderbook(self, pos: "Position", ts: datetime, best_bid: float, best_ask: float, bids, asks):
+        """Capture orderbook snapshot for position entry (only if first buy)."""
+        if pos.entry_timestamp is None:  # Only capture on first buy
+            pos.entry_timestamp = ts.isoformat()
+            
+            # Parse and sort bids (highest first) and asks (lowest first)
+            parsed_bids = []
+            parsed_asks = []
+            
+            if bids:
+                for b in bids:
+                    price = float(b.get("price", 0))
+                    size = float(b.get("size", 0))
+                    if price > 0 and size > 0:
+                        parsed_bids.append({"price": price, "size": size})
+                parsed_bids.sort(key=lambda x: x["price"], reverse=True)  # Highest bid first
+            
+            if asks:
+                for a in asks:
+                    price = float(a.get("price", 0))
+                    size = float(a.get("size", 0))
+                    if price > 0 and size > 0:
+                        parsed_asks.append({"price": price, "size": size})
+                parsed_asks.sort(key=lambda x: x["price"])  # Lowest ask first
+            
+            # Get actual best bid/ask from sorted levels
+            actual_best_bid = parsed_bids[0]["price"] if parsed_bids else 0.0
+            actual_best_ask = parsed_asks[0]["price"] if parsed_asks else 0.0
+            
+            pos.entry_best_bid = actual_best_bid
+            pos.entry_best_ask = actual_best_ask
+            pos.entry_spread = actual_best_ask - actual_best_bid if actual_best_bid > 0 and actual_best_ask > 0 else 0.0
+            
+            # Store top 3 levels (already sorted)
+            pos.entry_bids_top3 = parsed_bids[:3] if parsed_bids else []
+            pos.entry_asks_top3 = parsed_asks[:3] if parsed_asks else []
 
     async def _handle_global_tp(self, ts: datetime):
         """Handle global take profit hit."""
@@ -474,6 +526,11 @@ class LiveStrategy:
                     shares, cost, avg_p = self._exec_buy(check_aid, buy_amount, winner_tick.asks, winner_tick.best_ask)
                     if shares > 0:
                         pos = ms.get_position(check_aid)
+                        
+                        # Capture orderbook snapshot on first buy
+                        self._capture_entry_orderbook(pos, ts, winner_tick.best_bid, winner_tick.best_ask, 
+                                                     winner_tick.bids, winner_tick.asks)
+                        
                         pos.shares += shares
                         pos.cost += cost
                         pos.update_avg()
@@ -596,6 +653,11 @@ class LiveStrategy:
                         )
                         if shares > 0:
                             opp_pos = ms.get_position(opp_aid)
+                            
+                            # Capture orderbook snapshot on first buy
+                            self._capture_entry_orderbook(opp_pos, ts, opp_tick.best_bid, opp_tick.best_ask,
+                                                         opp_tick.bids, opp_tick.asks)
+                            
                             opp_pos.shares += shares
                             opp_pos.cost += cost
                             opp_pos.update_avg()

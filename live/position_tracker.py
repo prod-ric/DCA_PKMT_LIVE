@@ -22,6 +22,13 @@ class Position:
     shares: float = 0.0
     cost: float = 0.0
     avg_price: float = 0.0
+    # Orderbook snapshot at entry (first buy)
+    entry_timestamp: Optional[str] = None
+    entry_best_bid: Optional[float] = None
+    entry_best_ask: Optional[float] = None
+    entry_spread: Optional[float] = None
+    entry_bids_top3: Optional[List[Dict]] = field(default=None)  # Top 3 bid levels
+    entry_asks_top3: Optional[List[Dict]] = field(default=None)  # Top 3 ask levels
 
     def update_avg(self):
         if self.shares > 0:
@@ -34,7 +41,8 @@ class Position:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Position":
-        return cls(**d)
+        # Handle legacy positions without orderbook fields
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass

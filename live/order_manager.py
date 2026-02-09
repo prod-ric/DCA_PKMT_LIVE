@@ -49,10 +49,21 @@ class PaperOrderManager:
             (shares_bought, total_cost, avg_price)
         """
         levels = parse_orderbook_levels(asks)
+        
+        # Debug logging
+        logger.info(f"[ORDER_MGR BUY] Raw asks type: {type(asks)}, has data: {bool(asks)}")
+        logger.info(f"[ORDER_MGR BUY] Parsed {len(levels)} levels, amount: ${amount_usd:.2f}")
+        if levels:
+            logger.info(f"[ORDER_MGR BUY] First 3 levels: {levels[:3]}")
+        else:
+            logger.warning(f"[ORDER_MGR BUY] ⚠️  EMPTY LEVELS! Raw: {str(asks)[:200]}")
+        
         if not levels or amount_usd <= 0:
+            logger.warning(f"[ORDER_MGR BUY] Returning 0 (no levels or invalid amount)")
             return 0.0, 0.0, 0.0
 
         shares, cost, remaining = 0.0, 0.0, amount_usd
+        levels_used = 0
         for level in levels:
             if remaining <= 0:
                 break
@@ -64,10 +75,11 @@ class PaperOrderManager:
             shares += take
             cost += take * p
             remaining -= take * p
+            levels_used += 1
 
         avg_price = cost / shares if shares > 0 else 0.0
         self.order_count += 1
-        logger.info(f"[PAPER BUY] {shares:.4f} shares @ avg ${avg_price:.4f} = ${cost:.2f}")
+        logger.info(f"[PAPER BUY] {shares:.4f} shares @ avg ${avg_price:.4f} = ${cost:.2f} (used {levels_used} levels)")
         return shares, cost, avg_price
 
     def execute_sell(self, bids, shares_to_sell: float) -> Tuple[float, float, float]:
