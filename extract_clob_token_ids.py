@@ -82,6 +82,72 @@ def extract_clob_token_ids(json_file: Path) -> Optional[List[str]]:
     return info['clobTokenIds'] if info else None
 
 
+def generate_markets_json_format(market_data: Dict[str, Dict[str, Any]], default_capital: float = 100.0) -> Dict[str, Any]:
+    """
+    Generate markets data in the format required by live/markets.json
+    
+    Args:
+        market_data: Dictionary of market information extracted from JSON files
+        default_capital: Default capital to assign to each market
+        
+    Returns:
+        Dictionary in the format: {"markets": [...]}
+    """
+    markets_list = []
+    
+    for filename, info in sorted(market_data.items()):
+        # Generate a simple name from the title (lowercase, replace spaces with hyphens)
+        title = info.get('title', filename.replace('.json', ''))
+        name = title.lower().replace(' ', '-').replace('?', '').replace(',', '')[:50]
+        
+        # Format dates to ISO 8601 format if available
+        start_time = info.get('startDate')
+        end_time = info.get('endDate')
+        
+        # Ensure dates end with 'Z' for UTC timezone
+        if start_time and not start_time.endswith('Z'):
+            start_time = start_time + 'Z' if 'T' in start_time else start_time
+        if end_time and not end_time.endswith('Z'):
+            end_time = end_time + 'Z' if 'T' in end_time else end_time
+        
+        market_entry = {
+            "condition_id": info['conditionId'],
+            "asset_ids": info['clobTokenIds'],
+            "name": name,
+            "start_time": start_time or "2026-02-10T00:00:00Z",
+            "end_time": end_time or "2026-02-10T03:00:00Z",
+            "capital": default_capital
+        }
+        
+        markets_list.append(market_entry)
+    
+    return {"markets": markets_list}
+
+
+def update_markets_json_file(market_data: Dict[str, Dict[str, Any]], output_path: str = "live/markets.json", default_capital: float = 100.0):
+    """
+    Update or create a markets.json file in the live/ directory
+    
+    Args:
+        market_data: Dictionary of market information extracted from JSON files
+        output_path: Path to the output markets.json file
+        default_capital: Default capital to assign to each market
+    """
+    markets_json = generate_markets_json_format(market_data, default_capital)
+    
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(markets_json, f, indent=4, ensure_ascii=False)
+    
+    print("\n" + "=" * 80)
+    print(f"✓ Updated {output_path} with {len(markets_json['markets'])} markets")
+    print("=" * 80)
+    print("\nGenerated markets.json content:")
+    print(json.dumps(markets_json, indent=4))
+
+
 def update_config_file(market_data: Dict[str, Dict[str, Any]], config_path: str = "config.py"):
     config_file = Path(config_path)
     if not config_file.exists():
@@ -250,6 +316,7 @@ def process_all_markets(markets_dir: str = "markets", output_file: str = "clob_t
     
     if market_data:
         update_config_file(market_data)
+        update_markets_json_file(market_data, output_path="live/markets.json", default_capital=100.0)
 
 
 if __name__ == "__main__":
