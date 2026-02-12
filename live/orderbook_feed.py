@@ -264,12 +264,55 @@ class OrderbookFeed:
         if tick.asset_id and tick.market_id:
             self.asset_to_market[tick.asset_id] = tick.market_id
 
-    def stop(self):
+    async def stream(self):
+        """Async generator that yields ticks. Bridges callback → async-for.
+
+        Usage::
+
+            async for tick in feed.stream():
+                process(tick)
+        """
+        queue: asyncio.Queue = asyncio.Queue()
+
+        # Wire the internal callback to push ticks into the queue
+        self.on_tick = queue.put
+
+        # Run the WebSocket listener as a background task
+        self._run_task = asyncio.create_task(self.run())
+
+        try:
+            while self.running or not queue.empty():
+                try:
+                    tick = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    yield tick
+                except asyncio.TimeoutError:
+                    # Check if the background task died unexpectedly
+                    if self._run_task.done():
+                        exc = self._run_task.exception()
+                        if exc:
+                            logger.error(f"Feed task crashed: {exc}")
+                        break
+                    continue
+        finally:
+            self.stop()
+
+    async def close(self):
+        """Gracefully shut down the feed and wait for the background task."""
         self.running = False
         if self.ws:
-            asyncio.get_event_loop().call_soon_threadsafe(
-                lambda: asyncio.ensure_future(self.ws.close()) if self.ws else None
-            )
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+        if hasattr(self, '_run_task') and not self._run_task.done():
+            self._run_task.cancel()
+            try:
+                await self._run_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    def stop(self):
+        self.running = False
 
     def get_stats(self) -> dict:
         return {
