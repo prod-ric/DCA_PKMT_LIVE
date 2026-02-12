@@ -232,6 +232,69 @@ def update_config_file(market_data: Dict[str, Dict[str, Any]], config_path: str 
     print("=" * 80)
 
 
+def update_env_file(all_asset_ids: List[str], env_path: str = ".env"):
+    """
+    Create or update .env file with POLYMARKET_ASSET_IDS.
+    
+    Preserves all other existing lines in the .env file and only
+    replaces/appends the POLYMARKET_ASSET_IDS line.
+    
+    Args:
+        all_asset_ids: List of all CLOB token IDs to include
+        env_path: Path to the .env file
+    """
+    env_file = Path(env_path)
+    asset_ids_line = f"POLYMARKET_ASSET_IDS={','.join(all_asset_ids)}"
+
+    if env_file.exists():
+        with open(env_file, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        # Replace existing POLYMARKET_ASSET_IDS line, or append
+        found = False
+        new_lines = []
+        for line in lines:
+            if line.strip().startswith('POLYMARKET_ASSET_IDS='):
+                new_lines.append(asset_ids_line + '\n')
+                found = True
+            else:
+                new_lines.append(line)
+
+        if not found:
+            # Ensure there's a newline before appending
+            if new_lines and not new_lines[-1].endswith('\n'):
+                new_lines.append('\n')
+            new_lines.append(asset_ids_line + '\n')
+
+        with open(env_file, 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
+        action = "Updated existing"
+    else:
+        # Create from .env.example if it exists, otherwise create minimal
+        example_path = Path('.env.example')
+        if example_path.exists():
+            with open(example_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            # Replace the placeholder line
+            if 'POLYMARKET_ASSET_IDS=' in content:
+                lines = content.split('\n')
+                lines = [asset_ids_line if l.strip().startswith('POLYMARKET_ASSET_IDS=') else l for l in lines]
+                content = '\n'.join(lines)
+            else:
+                content += f'\n{asset_ids_line}\n'
+            with open(env_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+        else:
+            with open(env_file, 'w', encoding='utf-8') as f:
+                f.write(f'{asset_ids_line}\n')
+        action = "Created"
+
+    print("\n" + "=" * 80)
+    print(f"✓ {action} {env_path} with {len(all_asset_ids)} asset IDs")
+    print(f"  POLYMARKET_ASSET_IDS={','.join(all_asset_ids[:3])}{',...' if len(all_asset_ids) > 3 else ''}")
+    print("=" * 80)
+
+
 def process_all_markets(markets_dir: str = "markets", output_file: str = "clob_token_ids_by_file.json"):
     markets_path = Path(markets_dir)
     print(markets_path)
@@ -317,6 +380,7 @@ def process_all_markets(markets_dir: str = "markets", output_file: str = "clob_t
     if market_data:
         update_config_file(market_data)
         update_markets_json_file(market_data, output_path="live/markets.json", default_capital=100.0)
+        update_env_file(all_token_ids, env_path=".env")
 
 
 if __name__ == "__main__":

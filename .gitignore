@@ -25,7 +25,7 @@ data/
 collector_parquet/data/
 
 # ── Live trading system (not part of the backtest repo) ───────────────────────
-live/
+#live/
 
 # ── Market JSON data directories ──────────────────────────────────────────────
 *_markets/
