@@ -301,19 +301,6 @@ Capital is allocated equally across all selected markets. A global take-profit (
 
 ---
 
-## Results
-
-Backtested across 6 days (Jan 24–27, Feb 1–2, 2026) with real orderbook data:
-
-- **Win Rate**: 72–85% depending on the day
-- **Average Return**: +8–15% per day on $500 capital
-- **Hedge Activation**: 15–25% of markets required hedging
-- **Early Entries**: 30–40% of markets qualified
-- **Max Drawdown per Market**: ~12% (typically hedged before worse)
-
-See [medium_article.md](medium_article.md) for a detailed write-up of the strategy, optimization process, and lessons learned.
-
----
 
 ## Setup & Installation
 
