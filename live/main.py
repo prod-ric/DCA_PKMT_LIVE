@@ -141,26 +141,21 @@ async def run(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    # ── Status printer ──
-    async def print_status():
+    # ── Periodic dashboard + data stats ──
+    async def dashboard_loop():
         while not shutdown_event.is_set():
-            await asyncio.sleep(30)
-            total_pnl = tracker.get_total_pnl()
+            await asyncio.sleep(60)
+            if shutdown_event.is_set():
+                break
+            strategy.print_dashboard(trigger="PERIODIC")
             stats = collector.get_stats()
-            active_positions = sum(
-                1
-                for ms in tracker.markets.values()
-                for pos in ms.positions.values()
-                if pos.shares > 0
-            )
             logger.info(
-                f"[STATUS] ticks={strategy.tick_count:,} | "
-                f"pnl=${total_pnl:+.2f} | "
-                f"positions={active_positions} | "
-                f"data={stats['total_records']:,} records"
+                f"[DATA] records={stats['total_records']:,} | "
+                f"buffered={stats['records_buffered']} | "
+                f"chunks={stats['chunk_count']}"
             )
 
-    status_task = asyncio.create_task(print_status())
+    status_task = asyncio.create_task(dashboard_loop())
 
     # ── Main loop ──
     try:

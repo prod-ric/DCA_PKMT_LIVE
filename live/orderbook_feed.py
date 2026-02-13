@@ -70,12 +70,16 @@ class OrderbookTick:
         "bids",
         "asks",
         "raw",
+        "event_type",
+        "raw_json",
     ]
 
     def __init__(self, asset_id: str, market_id: str,
                  best_bid: float, best_ask: float,
                  bids: list, asks: list,
-                 raw: dict = None):
+                 raw: dict = None,
+                 event_type: str = "book",
+                 raw_json: str = ""):
         self.timestamp = datetime.utcnow()
         self.asset_id = asset_id
         self.market_id = market_id
@@ -84,6 +88,8 @@ class OrderbookTick:
         self.bids = bids
         self.asks = asks
         self.raw = raw or {}
+        self.event_type = event_type
+        self.raw_json = raw_json
         if best_bid > 0 and best_ask > 0:
             self.mid_price = (best_bid + best_ask) / 2
             self.spread = best_ask - best_bid
@@ -117,6 +123,8 @@ class OrderbookTick:
         obj.bids = bids or []
         obj.asks = asks or []
         obj.raw = {}
+        obj.event_type = "synthetic"
+        obj.raw_json = ""
         if mid_price is not None:
             obj.mid_price = mid_price
         elif best_bid > 0 and best_ask > 0:
@@ -268,7 +276,9 @@ class OrderbookFeed:
         return self._books[asset_id]
 
     def _make_tick(self, asset_id: str, market_id: str,
-                   raw: dict = None) -> OrderbookTick:
+                   raw: dict = None,
+                   event_type: str = "book",
+                   raw_json: str = "") -> OrderbookTick:
         """Build a tick from the current reconstructed book state."""
         book = self._get_book(asset_id)
         return OrderbookTick(
@@ -279,6 +289,8 @@ class OrderbookFeed:
             bids=book.sorted_bids(),
             asks=book.sorted_asks(),
             raw=raw,
+            event_type=event_type,
+            raw_json=raw_json,
         )
 
     # ── connection lifecycle ────────────────────────────────────
@@ -358,32 +370,32 @@ class OrderbookFeed:
             if isinstance(data, list):
                 for item in data:
                     if isinstance(item, dict):
-                        await self._dispatch_event(item)
+                        await self._dispatch_event(item, raw_json=message)
                 return
 
             if isinstance(data, dict):
-                await self._dispatch_event(data)
+                await self._dispatch_event(data, raw_json=message)
 
         except json.JSONDecodeError as e:
             logger.error(f"JSON parse error: {e}")
         except Exception as e:
             logger.error(f"Message handling error: {e}", exc_info=True)
 
-    async def _dispatch_event(self, data: dict):
+    async def _dispatch_event(self, data: dict, raw_json: str = ""):
         """Route a single event dict (``book`` or ``price_change``)."""
         event_type = data.get("event_type", "")
 
         if event_type == "book":
-            await self._on_book(data)
+            await self._on_book(data, raw_json=raw_json)
 
         elif event_type == "price_change":
-            await self._on_price_change(data)
+            await self._on_price_change(data, raw_json=raw_json)
 
         # Silently ignore unknown / control messages (subscribe ack, etc.)
 
     # ── book snapshot ───────────────────────────────────────────
 
-    async def _on_book(self, data: dict):
+    async def _on_book(self, data: dict, raw_json: str = ""):
         """Handle a full ``book`` snapshot — replaces the entire book."""
         self.book_messages += 1
         asset_id = data.get("asset_id", "")
@@ -394,14 +406,15 @@ class OrderbookFeed:
         book = self._get_book(asset_id)
         book.reset(data.get("bids", []), data.get("asks", []))
 
-        tick = self._make_tick(asset_id, market_id, raw=data)
+        tick = self._make_tick(asset_id, market_id, raw=data,
+                               event_type="book", raw_json=raw_json)
         self._track_asset(tick)
         if self.on_tick:
             await self._dispatch_tick(tick)
 
     # ── price_change deltas ─────────────────────────────────────
 
-    async def _on_price_change(self, data: dict):
+    async def _on_price_change(self, data: dict, raw_json: str = ""):
         """Handle a ``price_change`` — apply delta(s), emit tick(s)."""
         self.price_change_messages += 1
         market_id = data.get("market", "")
@@ -425,7 +438,8 @@ class OrderbookFeed:
                 if side in ("BUY", "SELL") and price > 0:
                     book.apply_delta(side, price, size)
 
-            tick = self._make_tick(aid, market_id, raw=data)
+            tick = self._make_tick(aid, market_id, raw=data,
+                                   event_type="price_change", raw_json=raw_json)
             self._track_asset(tick)
             if self.on_tick:
                 await self._dispatch_tick(tick)

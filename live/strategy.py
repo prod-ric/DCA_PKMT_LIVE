@@ -19,6 +19,7 @@ Key features ported from backtest:
 """
 
 import logging
+import time
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -191,6 +192,8 @@ class LiveStrategy:
         self._latest_book: Dict[str, OrderbookTick] = {}  # asset_id -> tick
 
         self.tick_count = 0
+        self._last_dashboard_time = 0.0  # epoch seconds
+        self.DASHBOARD_INTERVAL = 60  # print every N seconds
         logger.info(
             f"Strategy initialised | mode={trading_mode} | "
             f"entry={self.ENTRY} | TP={self.TP_PCT} | SL={self.SL_PCT}"
@@ -362,11 +365,118 @@ class LiveStrategy:
                             f"📈 BUY [{ms.name or mid[:20]}] {entry_reason}: "
                             f"{shares:.2f} @ ${avg_p:.4f} = ${cost:.2f}"
                         )
+                        self.print_dashboard(trigger=f"BUY_{entry_reason}")
                         break  # one tier per tick
 
         # Periodic state save
         if self.tick_count % 100 == 0:
             self.tracker.save_state()
+
+        # Periodic dashboard
+        now_epoch = time.time()
+        if now_epoch - self._last_dashboard_time >= self.DASHBOARD_INTERVAL:
+            self.print_dashboard()
+            self._last_dashboard_time = now_epoch
+
+    # ================================================================
+    #  DASHBOARD
+    # ================================================================
+
+    def print_dashboard(self, trigger: str = "PERIODIC"):
+        """Print a comprehensive overview of all positions to the console."""
+        now = datetime.utcnow()
+        total_pnl = self.tracker.get_total_pnl()
+        total_value = self.tracker.get_total_value()
+        realized = sum(ms.pnl for ms in self.tracker.markets.values())
+        unrealized = total_pnl - realized
+
+        lines = []
+        sep = "=" * 90
+        lines.append(f"\n{sep}")
+        lines.append(
+            f"  DASHBOARD [{trigger}]  {now.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+            f"  |  mode={self.mode}  |  ticks={self.tick_count:,}"
+        )
+        lines.append(sep)
+        lines.append(
+            f"  Capital: ${self.tracker.initial_capital:.2f}  |  "
+            f"Portfolio: ${total_value:.2f}  |  "
+            f"PnL Total: ${total_pnl:+.2f} ({total_pnl / self.tracker.initial_capital * 100:+.1f}%)"
+        )
+        lines.append(
+            f"  Realized: ${realized:+.2f}  |  Unrealized: ${unrealized:+.2f}"
+        )
+        lines.append("-" * 90)
+
+        has_any_position = False
+
+        for mid, ms in self.tracker.markets.items():
+            active_positions = [
+                (aid, pos)
+                for aid, pos in ms.positions.items()
+                if pos.shares > 0
+            ]
+
+            label = ms.name or mid[:20]
+            status_parts = []
+            if ms.hit_99:
+                status_parts.append("HIT_99")
+            if ms.panic_flip_triggered:
+                status_parts.append("PANIC_FLIP")
+            if ms.promoted:
+                status_parts.append("PROMOTED")
+            if ms.hedge_asset:
+                status_parts.append("HEDGED")
+            if ms.early_entry_triggered:
+                status_parts.append("EARLY")
+            status_str = " | ".join(status_parts) if status_parts else ""
+
+            if not active_positions:
+                if ms.pnl != 0 or ms.sl_count or ms.tp_count:
+                    lines.append(
+                        f"  {label:30s}  FLAT  cash=${ms.cash:.2f}  "
+                        f"realized=${ms.pnl:+.2f}  SL={ms.sl_count} TP={ms.tp_count}"
+                        + (f"  [{status_str}]" if status_str else "")
+                    )
+                continue
+
+            has_any_position = True
+            tiers = ",".join(ms.tiers_filled) if ms.tiers_filled else "-"
+            lines.append(
+                f"  {label:30s}  cash=${ms.cash:.2f}  "
+                f"tiers=[{tiers}]  SL={ms.sl_count} TP={ms.tp_count}"
+                + (f"  [{status_str}]" if status_str else "")
+            )
+
+            for aid, pos in active_positions:
+                cur_price = self.tracker.get_price(mid, aid)
+                value = pos.shares * cur_price
+                pnl_pos = value - pos.cost
+                pnl_pct = (pnl_pos / pos.cost * 100) if pos.cost > 0 else 0.0
+                role = ""
+                if aid == ms.main_asset:
+                    role = "MAIN"
+                elif aid == ms.hedge_asset:
+                    role = "HEDGE"
+                lines.append(
+                    f"    {role:6s}  {aid[:16]}..  "
+                    f"shares={pos.shares:>8.2f}  "
+                    f"avg=${pos.avg_price:.4f}  "
+                    f"now=${cur_price:.4f}  "
+                    f"val=${value:>8.2f}  "
+                    f"pnl=${pnl_pos:>+7.2f} ({pnl_pct:>+5.1f}%)"
+                )
+
+        if not has_any_position:
+            any_activity = any(
+                ms.pnl != 0 or ms.sl_count or ms.tp_count
+                for ms in self.tracker.markets.values()
+            )
+            if not any_activity:
+                lines.append("  No active positions.")
+        lines.append(sep + "\n")
+
+        print("\n".join(lines), flush=True)
 
     # ================================================================
     #  PRIVATE HELPERS
@@ -429,6 +539,7 @@ class LiveStrategy:
         self.tracker.global_tp_hit = True
         self.tracker.global_tp_ts = ts.isoformat()
         logger.info(f"🎯 GLOBAL TP HIT at {ts}")
+        self.print_dashboard(trigger="GLOBAL_TP")
         for mid, ms in self.tracker.markets.items():
             for aid, pos in ms.positions.items():
                 if pos.shares > 0:
@@ -543,6 +654,7 @@ class LiveStrategy:
             logger.info(
                 f"🚨 PANIC FLIP [{ms.name or mid[:20]}]: {ms.panic_flip_reason}"
             )
+            self.print_dashboard(trigger="PANIC_FLIP")
             break
 
     # ────────────── HEDGE EXIT ──────────────
@@ -591,6 +703,7 @@ class LiveStrategy:
                         f"🔻 HEDGE SOLD [{ms.name or mid[:20]}]: "
                         f"drop={hedge_drop:.2f} pnl=${pnl:+.2f}"
                     )
+                    self.print_dashboard(trigger="HEDGE_EXIT")
         else:
             ms.hedge_drop_confirm_count = 0
 
@@ -694,6 +807,7 @@ class LiveStrategy:
                                 f"🛡️ HEDGE [{ms.name or mid[:20]}]: "
                                 f"{drop_reason} ${cost:.2f} @ {avg_p:.2f}"
                             )
+                            self.print_dashboard(trigger=f"HEDGE_{drop_reason}")
         else:
             ms.main_drop_confirm_count = 0
 
@@ -768,6 +882,7 @@ class LiveStrategy:
         ms.hedge_asset = None
         ms.active_asset = ms.main_asset
         logger.info(f"🔄 PROMOTION [{ms.name or mid[:20]}]: {reason}")
+        self.print_dashboard(trigger=f"PROMOTION_{reason}")
 
     # ────────────── EXITS ──────────────
 
@@ -874,4 +989,5 @@ class LiveStrategy:
         logger.info(
             f"{icon} EXIT [{ms.name or mid[:20]}] {exit_reason}: pnl=${pnl:+.2f}"
         )
+        self.print_dashboard(trigger=f"SELL_{exit_reason}")
         return True

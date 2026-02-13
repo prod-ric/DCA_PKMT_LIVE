@@ -44,6 +44,8 @@ class DataCollector:
             ("spread", pa.float64()),
             ("orderbook_bids", pa.string()),
             ("orderbook_asks", pa.string()),
+            ("event_type", pa.string()),
+            ("raw_json", pa.string()),
         ]
     )
 
@@ -126,6 +128,8 @@ class DataCollector:
                 "spread": tick.spread,
                 "orderbook_bids": json.dumps(tick.bids) if tick.bids else "[]",
                 "orderbook_asks": json.dumps(tick.asks) if tick.asks else "[]",
+                "event_type": getattr(tick, "event_type", ""),
+                "raw_json": getattr(tick, "raw_json", ""),
             }
             with self.buffer_lock:
                 self.buffer.append(record)
