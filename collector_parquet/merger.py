@@ -104,7 +104,7 @@ def merge_chunks(data_dir: str = "data/chunks", output_file: str = None, delete_
     
     # Concatenate all tables
     logger.info("Concatenating tables...")
-    combined = pa.concat_tables(tables)
+    combined = pa.concat_tables(tables, promote_options="default")
     
     # Sort by timestamp
     logger.info("Sorting by timestamp...")

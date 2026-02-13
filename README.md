@@ -1,6 +1,6 @@
-# Polymarket DCA Backtesting Framework
+# Polymarket DCA Trading System
 
-A complete system for **collecting real-time orderbook data** from [Polymarket](https://polymarket.com/) prediction markets and **backtesting a multi-tier Dollar-Cost Averaging (DCA) strategy** with realistic execution against reconstructed orderbooks.
+A complete system for **collecting real-time orderbook data** from [Polymarket](https://polymarket.com/) prediction markets, **backtesting** a multi-tier DCA strategy with realistic orderbook execution, and **live/paper trading** via the Polymarket CLOB API.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![Pandas](https://img.shields.io/badge/Pandas-2.0+-green)
@@ -12,16 +12,21 @@ A complete system for **collecting real-time orderbook data** from [Polymarket](
 
 - [Overview](#overview)
 - [Project Structure](#project-structure)
-- [Data Pipeline](#data-pipeline)
-  - [1. Market Discovery](#1-market-discovery)
-  - [2. Real-Time Collection](#2-real-time-collection-collector_parquet)
-  - [3. Chunk Merging](#3-chunk-merging-mergerpy)
-  - [4. Orderbook Reconstruction](#4-orderbook-reconstruction-reconstruct_orderbookspy)
+- [Unified Parquet Schema](#unified-parquet-schema)
+- [Data Collection (`collector_parquet/`)](#data-collection-collector_parquet)
+  - [Market Discovery](#market-discovery)
+  - [Real-Time Collection](#real-time-collection)
+  - [Chunk Merging](#chunk-merging)
+- [Live Trading (`live/`)](#live-trading-live)
+  - [Modes](#modes)
+  - [Architecture](#architecture)
+  - [Configuration](#configuration)
+  - [Running](#running)
+  - [Position Dashboard](#position-dashboard)
 - [Backtest Notebook](#backtest-notebook)
   - [Strategy Overview](#strategy-overview)
-  - [The Eight Pillars](#the-eight-pillars-of-the-strategy)
-  - [How to Run](#how-to-run-a-backtest)
-- [Results](#results)
+  - [The Eight Pillars](#the-eight-pillars)
+  - [Running a Backtest](#running-a-backtest)
 - [Setup & Installation](#setup--installation)
 - [Technologies](#technologies)
 
@@ -36,213 +41,211 @@ Prediction markets have binary outcomes (pays $1.00 or $0.00), defined endpoints
 - **Thin liquidity** — orderbooks can be sparse, making execution quality critical
 - **Information cascades** — prices can move violently as new information emerges
 
-This project addresses these challenges with:
+This project addresses them with three integrated components:
 
-1. **A real-time data collector** that captures full orderbook snapshots via Polymarket's WebSocket API
-2. **An orderbook reconstruction pipeline** that replays book snapshots and price_change deltas to rebuild the complete orderbook at every tick
-3. **A backtesting engine** that simulates trades against the actual orderbook — not just mid-prices — accounting for spreads, partial fills, and liquidity depth
-4. **Optuna-based optimization** that finds robust strategy parameters across multiple days of data
+1. **`collector_parquet/`** — a standalone data collector that records full orderbook data (with on-the-fly reconstruction) to Parquet files for later backtesting
+2. **`live/`** — a live/paper trading engine that runs the DCA v19 strategy in real-time against the Polymarket CLOB, with an optional parquet recording mode
+3. **`dca_backtest_v11_organized.ipynb`** — a Jupyter notebook that backtests the strategy against collected data with realistic orderbook execution, visualization, and Optuna optimization
+
+Both the collector and the live system reconstruct orderbooks on-the-fly from WebSocket `book` + `price_change` events, producing the same unified Parquet schema. There is no separate reconstruction step.
 
 ---
 
 ## Project Structure
 
 ```
-├── dca_backtest_v11_organized.ipynb  # Main backtest notebook
-├── collector_parquet/                # Real-time data collection system
-│   ├── main.py                      # Entry point — runs the WebSocket collector
-│   ├── websocket_client.py          # Polymarket WebSocket subscription & message handling
-│   ├── database.py                  # Parquet storage with buffered writes & chunk management
-│   ├── config.py                    # Configuration (asset IDs, WebSocket URL, etc.)
-│   ├── merger.py                    # Merges chunk files into a single parquet
-│   ├── reconstruct_orderbooks.py    # Rebuilds full orderbooks from snapshots + deltas
-│   ├── init_database.py             # Database initialization utility
-│   └── requirements.txt             # Python dependencies for the collector
-├── extract_clob_token_ids.py        # Extracts market/token IDs from Polymarket API responses
-├── json_joiner.py                   # Utility to combine market JSON files
-├── medium_article.md                # Detailed strategy write-up
-├── *_markets/                        # Raw Polymarket API responses per day (market metadata)
-└── data_markets/                    # Current day's market JSON files
+├── dca_backtest_v11_organized.ipynb   # Backtest notebook (DCA v19)
+│
+├── collector_parquet/                 # Standalone data collector
+│   ├── main.py                       # Entry point
+│   ├── websocket_client.py           # WebSocket subscription & message routing
+│   ├── database.py                   # On-the-fly orderbook reconstruction + Parquet storage
+│   ├── config.py                     # Configuration (asset IDs, URLs, intervals)
+│   ├── merger.py                     # Merges chunk files into a single sorted parquet
+│   ├── reconstruct_orderbooks.py     # Legacy script (for old-format files only)
+│   ├── init_database.py              # Database directory init utility
+│   └── requirements.txt              # Dependencies
+│
+├── live/                             # Live / paper trading engine
+│   ├── main.py                       # Entry point — paper / live / parquet modes
+│   ├── orderbook_feed.py             # WebSocket feed with _BookState reconstruction
+│   ├── strategy.py                   # DCA v19 strategy logic + position dashboard
+│   ├── order_manager.py              # Order execution (live CLOB, paper sim, or noop)
+│   ├── position_tracker.py           # Position & PnL tracking
+│   ├── data_collector.py             # Parquet recording (parquet mode)
+│   ├── config.py                     # Configuration loader
+│   ├── backtest_main.py              # Replay parquet files through the strategy
+│   ├── markets.json                  # Market definitions (condition IDs + asset IDs)
+│   └── .env.example                  # Environment variable template
+│
+├── extract_clob_token_ids.py         # Extracts market/token IDs from API responses
+├── json_joiner.py                    # Combines market JSON files
+├── *_markets/                        # Raw Polymarket API responses (market metadata)
+└── data_markets/                     # Current day's market JSON files
 ```
 
 ---
 
-## Data Pipeline
+## Unified Parquet Schema
 
-The data pipeline transforms live Polymarket WebSocket messages into analysis-ready parquet files with fully reconstructed orderbooks. Here is each stage in detail:
+Both `collector_parquet/` and `live/` produce parquet files with the same schema. The backtest notebook accepts either format transparently.
 
-### 1. Market Discovery
+| Column | Type | Description |
+|--------|------|-------------|
+| `timestamp` | int64 | Unix epoch in milliseconds |
+| `datetime` | timestamp[ms] | Human-readable timestamp |
+| `asset_id` | string | CLOB token ID (YES or NO side) |
+| `market_id` | string | Market condition ID |
+| `mid_price` | float64 | (best_bid + best_ask) / 2 |
+| `best_bid` | float64 | Best (highest) bid — from reconstructed book |
+| `best_ask` | float64 | Best (lowest) ask — from reconstructed book |
+| `spread` | float64 | best_ask − best_bid |
+| `orderbook_bids` | string (JSON) | Full bid side: `[{"price": 0.95, "size": 150}, ...]` |
+| `orderbook_asks` | string (JSON) | Full ask side: `[{"price": 0.96, "size": 200}, ...]` |
+| `event_type` | string | `"book"`, `"price_change"`, or `"synthetic"` |
+| `raw_json` | string | Original WebSocket message (for debugging/replay) |
 
-Before collecting data, we need to identify which markets to track.
+> **Note on legacy files:** Older parquet files produced by the previous pipeline used `ob_best_bid` / `ob_best_ask` / `ob_mid_price` instead of `best_bid` / `best_ask` / `mid_price`, and did not have `event_type` or `raw_json`. The notebook's `load_data()` function normalizes both formats automatically.
 
-**`extract_clob_token_ids.py`** processes Polymarket API response JSON files (stored in the `*_markets/` directories) and extracts:
-- **Condition IDs** — unique market identifiers on Polymarket's CLOB
-- **CLOB Token IDs** — the YES/NO asset token IDs needed for WebSocket subscriptions
-- **Market metadata** — title, start/end dates, question text
+### How Orderbooks Are Reconstructed
+
+Both modules use a `_BookState` class that maintains `{price: size}` dicts for each asset's bids and asks:
+
+- **`book` events** → full reset: replace entire bid/ask state from the snapshot
+- **`price_change` events** → incremental delta: set `bids[price] = size` or `asks[price] = size`; if `size == 0`, remove that level
+
+This happens *during collection*, so every recorded row already contains the full reconstructed orderbook. No post-processing step is needed.
+
+---
+
+## Data Collection (`collector_parquet/`)
+
+The standalone collector records orderbook data to Parquet files for later backtesting.
+
+### Market Discovery
+
+**`extract_clob_token_ids.py`** processes Polymarket API responses (in `*_markets/` directories) to extract condition IDs and CLOB token IDs:
 
 ```bash
-# Extract token IDs from today's market files
 python extract_clob_token_ids.py
 ```
 
-The extracted IDs are used to configure the collector's subscriptions.
-
-### 2. Real-Time Collection (`collector_parquet/`)
-
-The collector is an async WebSocket client that connects to Polymarket's orderbook feed and stores every message.
-
-#### Architecture
+### Real-Time Collection
 
 ```
 Polymarket WSS API
         │
         ▼
 websocket_client.py    ─── Subscribes to book + price_change channels
-        │
+        │                   Handles list-wrapped messages
         ▼
-database.py            ─── Buffers messages → writes Parquet chunks every 60s
-        │
+database.py            ─── _BookState reconstructs orderbooks on-the-fly
+        │                   Buffers rows → writes Parquet chunks every 60s
         ▼
 data/chunks/           ─── chunk_000000.parquet, chunk_000001.parquet, ...
 ```
 
-#### How it works
-
-1. **`websocket_client.py`** connects to `wss://ws-subscriptions-clob.polymarket.com/ws/market` and subscribes to specified asset IDs or market condition IDs
-2. Two types of messages are received:
-   - **`book`** — a complete orderbook snapshot (all bid and ask levels)
-   - **`price_change`** — incremental updates (a single level changed)
-3. **`database.py`** buffers incoming messages in memory and flushes them to a new Parquet chunk file every 60 seconds (or when the buffer reaches 100 records)
-4. On shutdown (Ctrl+C), the system flushes remaining data, merges all chunks, and produces a single `snapshots.parquet`
-
-#### Parquet Schema
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `timestamp` | int64 | Unix milliseconds |
-| `datetime` | timestamp[ms] | Human-readable timestamp |
-| `asset_id` | string | CLOB token ID |
-| `market_id` | string | Market condition ID |
-| `mid_price` | float64 | (best_bid + best_ask) / 2 |
-| `best_bid` | float64 | Highest bid price |
-| `best_ask` | float64 | Lowest ask price |
-| `spread` | float64 | best_ask - best_bid |
-| `raw_json` | string | Full JSON message (for orderbook reconstruction) |
-
-#### Running the collector
+1. `websocket_client.py` connects to `wss://ws-subscriptions-clob.polymarket.com/ws/market` and subscribes to specified assets
+2. `database.py` maintains a `_BookState` per `(market_id, asset_id)`, applies each event to reconstruct the full book, and buffers the resulting rows
+3. Every 60 seconds (or 100 rows), the buffer is flushed as a Parquet chunk
+4. On shutdown (Ctrl+C), remaining data is flushed and chunks are auto-merged
 
 ```bash
 cd collector_parquet
-
-# Set environment variables (or use .env file)
 export POLYMARKET_ASSET_IDS="token_id_1,token_id_2,..."
-export DATA_DIR="data"
-
-# Start collecting
 python main.py
-
-# Ctrl+C to stop — data is automatically flushed and merged
+# Ctrl+C to stop — data is flushed and merged automatically
 ```
 
-### 3. Chunk Merging (`merger.py`)
+### Chunk Merging
 
-During collection, data is written as many small chunk files for reliability (no data loss on crash). The merger combines them into a single sorted parquet.
-
-#### What it does
-
-1. Scans `data/chunks/` for all `chunk_*.parquet` files
-2. Reads each chunk into memory as a PyArrow table
-3. If an existing `snapshots.parquet` already exists, includes it in the merge
-4. Concatenates all tables and **sorts by timestamp**
-5. Writes the merged result with Snappy compression
-6. Optionally deletes the chunk files after successful merge
+Chunks provide crash resilience — if the process dies, only the in-memory buffer (≤60s) is lost.
 
 ```bash
 cd collector_parquet
-
-# Merge all chunks
-python merger.py merge --data-dir data
-
-# List chunk info
-python merger.py list --data-dir data
-
-# Show info about a parquet file
-python merger.py info data/snapshots.parquet
+python merger.py merge --data-dir data       # merge all chunks
+python merger.py list --data-dir data        # list chunk info
+python merger.py info data/snapshots.parquet  # inspect a file
 ```
 
-#### Why chunks?
+The merger uses `promote_options="default"` to handle schema differences between old-format and new-format chunks seamlessly.
 
-Writing to many small files instead of appending to one large file provides:
-- **Crash resilience** — if the process dies, you only lose the in-memory buffer (≤60s of data), not the entire file
-- **No rewrite overhead** — appending to Parquet requires reading and rewriting the entire file; chunks avoid this
-- **Parallel-friendly** — chunks can be processed independently if needed
+---
 
-### 4. Orderbook Reconstruction (`reconstruct_orderbooks.py`)
+## Live Trading (`live/`)
 
-This is the most critical step. The raw collected data stores `book` snapshots and `price_change` deltas as JSON strings. The reconstruction script **replays these events in order to rebuild the full orderbook state at every single tick**.
+The live module runs the DCA v19 strategy in real-time against Polymarket.
 
-#### The Problem
+### Modes
 
-Polymarket's WebSocket sends two types of events:
-- **`book`** events — a full snapshot of all bid and ask levels (sent periodically or on subscription)
-- **`price_change`** events — a single level update: `{side: "BUY"/"SELL", price: 0.95, size: 150}` where `size: 0` means remove that level
+| Mode | `--mode` | What it does |
+|------|----------|--------------|
+| **Paper** | `paper` | Simulates orders locally — no real money. Default. |
+| **Live** | `live` | Places real orders via the Polymarket CLOB API. |
+| **Parquet** | `parquet` | Records orderbook data to Parquet only (no trading). |
 
-Between full snapshots, you only receive deltas. To know the complete orderbook at any point in time, you must replay all events in order.
-
-#### How it works
+### Architecture
 
 ```
-For each (market_id, asset_id) group, sorted by datetime:
-
-    current_bids = {}
-    current_asks = {}
-
-    for each row:
-        if event is "book":
-            # Full reset — replace entire orderbook
-            current_bids = {price: size for each bid}
-            current_asks = {price: size for each ask}
-
-        elif event is "price_change":
-            # Incremental update — modify one level
-            if side == "BUY":
-                if size > 0: current_bids[price] = size
-                else:        del current_bids[price]   # level removed
-            elif side == "SELL":
-                if size > 0: current_asks[price] = size
-                else:        del current_asks[price]
-
-        # Write reconstructed orderbook to output arrays
-        output_bids[i] = sorted(current_bids, descending)[:50]
-        output_asks[i] = sorted(current_asks, ascending)[:50]
-        output_best_bid[i] = max(current_bids)
-        output_best_ask[i] = min(current_asks)
+orderbook_feed.py      ─── WebSocket + _BookState → OrderbookTick stream
+        │
+        ├──▶ strategy.py          ─── DCA v19 logic (entry, hedge, panic flip, etc.)
+        │       │
+        │       └──▶ order_manager.py    ─── Execute trades (paper/live)
+        │       └──▶ position_tracker.py ─── Track shares, avg cost, PnL
+        │
+        └──▶ data_collector.py    ─── Record ticks to Parquet (parquet mode)
 ```
 
-#### Performance optimizations
+### Configuration
 
-- **Pre-allocated NumPy arrays** — output is written directly to pre-allocated arrays, avoiding DataFrame overhead
-- **Group-based processing** — data is sorted by `(market_id, asset_id, datetime)` and processed in contiguous groups
-- **Chunked datetime resorting** — after group processing, a global datetime re-sort uses NumPy argsort with chunked column gathering for memory efficiency
-- Processes ~50,000+ rows/second on typical hardware
+1. Copy `.env.example` → `.env` and fill in your API keys (live mode only)
+2. Edit `markets.json` with the markets you want to trade:
 
-#### Output columns added
+```json
+[
+  {
+    "condition_id": "0xabc...",
+    "asset_ids": ["token_yes", "token_no"],
+    "name": "NBA - LAL vs NYK"
+  }
+]
+```
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `orderbook_bids` | string (JSON) | Full bid side: `[{"price": 0.95, "size": 150}, ...]` |
-| `orderbook_asks` | string (JSON) | Full ask side: `[{"price": 0.96, "size": 200}, ...]` |
-| `ob_best_bid` | float64 | Best (highest) bid price |
-| `ob_best_ask` | float64 | Best (lowest) ask price |
-| `ob_mid_price` | float64 | (ob_best_bid + ob_best_ask) / 2 |
-
-#### Running reconstruction
+### Running
 
 ```bash
-python reconstruct_orderbooks.py data/snapshots.parquet data/snapshots_reconstructed.parquet
+cd live
+
+# Paper trading (default)
+python main.py --mode paper
+
+# Live trading
+python main.py --mode live
+
+# Data collection only
+python main.py --mode parquet
 ```
 
-The output `*_reconstructed.parquet` file is what the backtest notebook consumes.
+### Position Dashboard
+
+The strategy prints a position dashboard every 60 seconds and after every trade event (BUY, SELL, HEDGE, PANIC_FLIP, PROMOTION, GLOBAL_TP):
+
+```
+╔══════════════════════════════════════════════════════════╗
+║                  POSITION DASHBOARD                     ║
+║  Trigger: BUY  |  2025-01-25 14:32:01                  ║
+╠══════════════════════════════════════════════════════════╣
+║  Capital: $850.00 / $1000.00                            ║
+║  Portfolio Value: $1,023.45                              ║
+║  Total PnL: +$23.45 (+2.35%)                            ║
+║  Realized: +$5.20  |  Unrealized: +$18.25               ║
+╠══════════════════════════════════════════════════════════╣
+║  NBA-LAL-NYK                                            ║
+║    YES: 50 shares @ 0.9200 → 0.9500  $47.50  +$1.50    ║
+║    NO:  — no position —                                 ║
+╚══════════════════════════════════════════════════════════╝
+```
 
 ---
 
@@ -250,11 +253,11 @@ The output `*_reconstructed.parquet` file is what the backtest notebook consumes
 
 ### Strategy Overview
 
-The strategy is a **multi-tier DCA (Dollar-Cost Averaging)** approach designed for prediction markets:
+The strategy is a **multi-tier DCA (Dollar-Cost Averaging)** approach for binary prediction markets:
 
 > **Enter gradually as confidence increases, but protect aggressively when things go wrong.**
 
-Instead of going all-in at a single price, capital is deployed across 4 tiers:
+Capital is deployed across 4 tiers:
 
 | Tier | Default Threshold | Capital Weight | Purpose |
 |------|------------------|----------------|---------|
@@ -263,104 +266,81 @@ Instead of going all-in at a single price, capital is deployed across 4 tiers:
 | DCA 2 | 0.97+ | 10% | Increase as conviction grows |
 | DCA 3 | 0.99+ | 6% | Final add at high confidence |
 
-### The Eight Pillars of the Strategy
+### The Eight Pillars
 
-#### 1. Multi-Tier DCA Entries
-Gradual capital deployment as the price crosses configurable thresholds, avoiding all-in risk.
+1. **Multi-Tier DCA Entries** — gradual capital deployment across configurable thresholds
+2. **Dynamic Hedging** — buy the opposite outcome when the main position drops (confirmed over N ticks to filter noise); sell hedge if it drops too; can re-hedge later
+3. **Panic Flip Detection** — when an asset surges 25+ points in 10 seconds above 0.85, immediately flip to it
+4. **Hedge Promotion** — if hedge outperforms main (20%+ PnL, price ≥0.50, or return delta ≥15%), promote it to main
+5. **Early Entry Detection** — enter markets trading stably for 25+ min with low volatility, before the standard window
+6. **Late-Game Stop-Loss Disable** — in the final 10% of market life, stop-losses are disabled to avoid pre-resolution shakeouts
+7. **Noise Filtering** — ticks with spread >10% are ignored for exit/hedge decisions; N consecutive confirming ticks required
+8. **Portfolio Management** — equal capital per market; global take-profit (default 20%) closes all positions
 
-#### 2. Dynamic Hedging
-When the main position drops significantly (confirmed over 20 ticks to avoid noise), the system buys the **opposite outcome** as insurance. If the hedge also drops, it's sold and can re-hedge later.
+### Running a Backtest
 
-#### 3. Panic Flip Detection
-Detects rapid resolution events — when an asset surges 25+ points in 10 seconds above 0.85, the system immediately sells any losing position and buys the surging asset.
+1. **Open** `dca_backtest_v11_organized.ipynb`
+2. **Set `DATA_PATHS`** (Section 2) — point to any parquet files (new or legacy format)
+3. **Configure parameters** (Section 9) — or use the defaults
+4. **Run All** — the notebook loads data (auto-normalizing columns), simulates the strategy, and prints results
+5. **Visualize** — price charts with trade markers
+6. **Optimize** (optional) — run Optuna across multiple days to find robust parameters
 
-#### 4. Hedge Promotion
-If a hedge position outperforms the main (20%+ PnL, price ≥0.50, or return delta ≥15%), it gets promoted to main and the original position is closed.
-
-#### 5. Early Entry Detection
-Markets that trade stably for 25+ minutes with <2.5% volatility and <7% price range can be entered before the standard trading window (40-90% of market life).
-
-#### 6. Late-Game Stop-Loss Disable
-In the final 10% of a market's life, stop-losses are disabled to avoid getting shaken out during pre-resolution volatility.
-
-#### 7. Noise Filtering
-Ticks with spread > 10% are considered noisy and ignored for exit/hedge decisions. Stop-losses and hedges require N consecutive confirming ticks before triggering.
-
-#### 8. Portfolio Management
-Capital is allocated equally across all selected markets. A global take-profit (default 20%) closes all positions once hit.
-
-### How to Run a Backtest
-
-1. **Prepare data** — run the collection & reconstruction pipeline (or use provided parquet files)
-2. **Open the notebook** — `dca_backtest_v11_organized.ipynb`
-3. **Set data paths** (Section 2) — point to your reconstructed parquet files
-4. **Configure parameters** (Section 9) — or use the defaults
-5. **Run all cells** — the backtest loads data, simulates the strategy, and prints results
-6. **Visualize** — run the plotting cells to see price charts with trade markers
-7. **Optimize** (optional, Section 10) — run Optuna across multiple days to find optimal parameters
+The notebook's `load_data()` auto-detects and handles both the new unified schema (`best_bid`, `best_ask`) and the legacy reconstructed format (`ob_best_bid`, `ob_best_ask`).
 
 ---
-
 
 ## Setup & Installation
 
 ### Requirements
 
 ```bash
-# Core dependencies
+# Core (notebook + backtest)
 pip install pandas numpy pyarrow matplotlib optuna
 
-# For the real-time collector only
-pip install websockets python-dotenv
+# Collector & live trading
+pip install websockets python-dotenv aiohttp
 ```
 
-Or use the collector's requirements file:
+### Quick Start — Backtest Only
 
 ```bash
-pip install -r collector_parquet/requirements.txt
-pip install matplotlib optuna  # additional for the notebook
+pip install pandas numpy pyarrow matplotlib optuna
+jupyter notebook dca_backtest_v11_organized.ipynb
+# Update DATA_PATHS in Section 2, then Run All
 ```
 
-### Quick Start (Backtest Only)
-
-If you already have reconstructed parquet files:
+### Full Pipeline — Collect → Backtest
 
 ```bash
 # 1. Install dependencies
-pip install pandas numpy pyarrow matplotlib optuna
-
-# 2. Open the notebook
-jupyter notebook dca_backtest_v11_organized.ipynb
-
-# 3. Update DATA_PATHS in Section 2, then Run All
-```
-
-### Full Pipeline (Collect → Reconstruct → Backtest)
-
-```bash
-# 1. Install all dependencies
 pip install -r collector_parquet/requirements.txt
 pip install matplotlib optuna
 
-# 2. Get market IDs from Polymarket API responses
-#    Place JSON files in data_markets/ directory
+# 2. Extract market/token IDs
 python extract_clob_token_ids.py
 
-# 3. Configure and start the collector
+# 3. Collect data (orderbooks reconstructed on-the-fly)
 cd collector_parquet
 export POLYMARKET_ASSET_IDS="id1,id2,..."
-python main.py
-# ... let it run, then Ctrl+C to stop
+python main.py          # Ctrl+C to stop
 
-# 4. If needed, merge chunks manually
+# 4. Merge chunks (if not auto-merged)
 python merger.py merge --data-dir data
 
-# 5. Reconstruct orderbooks
-python reconstruct_orderbooks.py data/snapshots.parquet data/snapshots_reconstructed.parquet
-
-# 6. Backtest
+# 5. Backtest — output is ready to use directly, no reconstruction needed
 cd ..
 jupyter notebook dca_backtest_v11_organized.ipynb
+```
+
+### Live/Paper Trading
+
+```bash
+cd live
+cp .env.example .env   # fill in API keys for live mode
+# edit markets.json with your target markets
+
+python main.py --mode paper    # or --mode live / --mode parquet
 ```
 
 ---

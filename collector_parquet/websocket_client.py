@@ -125,23 +125,36 @@ class PolymarketWebSocketClient:
             self.last_message_time = datetime.now()
             
             data = json.loads(message)
-            event_type = data.get('event_type')
-            
-            if event_type == 'book':
-                self.book_messages += 1
-                self.db.save_book_snapshot(data)
-                
-                if self.book_messages % 100 == 0:
-                    logger.debug(f"Received {self.book_messages} book snapshots")
-            
-            elif event_type == 'price_change':
-                self.price_change_messages += 1
-                self.db.save_price_change(data)
+
+            # Guard: some messages arrive as JSON arrays
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        self._process_event(item, message)
+                return
+
+            if isinstance(data, dict):
+                self._process_event(data, message)
         
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse message: {e}")
         except Exception as e:
             logger.error(f"Error handling message: {e}")
+
+    def _process_event(self, data: dict, raw_message: str):
+        """Route a single parsed event dict."""
+        event_type = data.get('event_type')
+
+        if event_type == 'book':
+            self.book_messages += 1
+            self.db.save_book_snapshot(data, raw_message=raw_message)
+
+            if self.book_messages % 100 == 0:
+                logger.debug(f"Received {self.book_messages} book snapshots")
+
+        elif event_type == 'price_change':
+            self.price_change_messages += 1
+            self.db.save_price_change(data, raw_message=raw_message)
     
     def stop(self):
         """Stop the WebSocket client"""
