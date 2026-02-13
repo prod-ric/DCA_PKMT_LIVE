@@ -25,42 +25,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from live.config import (
-    normalize_strategy_params,
-    DEFAULT_STRATEGY_PARAMS,
-    GLOBAL_TP_PCT,
-    LAST_MINUTES_ONLY,
-    LATE_GAME_THRESHOLD,
-    EARLY_ENTRY_ENABLED,
-    EARLY_ENTRY_MIN_PROGRESS,
-    EARLY_ENTRY_MAX_PROGRESS,
-    EARLY_ENTRY_PRICE_THRESHOLD,
-    EARLY_ENTRY_MAX_VOLATILITY,
-    EARLY_ENTRY_MAX_RANGE,
-    EARLY_ENTRY_MIN_DURATION_MINUTES,
-    EARLY_ENTRY_NO_DROP_THRESHOLD,
-    EARLY_ENTRY_NO_DROP_WINDOW,
-    HEDGE_ENABLED,
-    HEDGE_DROP_POINTS,
-    HEDGE_DROP_WINDOW,
-    HEDGE_DROP_FROM_ENTRY,
-    HEDGE_AMOUNT,
-    HEDGE_LATE_GAME_ONLY,
-    HEDGE_COOLDOWN_SECONDS,
-    HEDGE_DROP_CONFIRMATION_TICKS,
-    HEDGE_EXIT_CONFIRMATION_TICKS,
-    HEDGE_EXIT_DROP_POINTS,
-    PANIC_FLIP_ENABLED,
-    PANIC_FLIP_THRESHOLD,
-    PANIC_FLIP_WINDOW,
-    PANIC_FLIP_MIN_PRICE,
-    PANIC_FLIP_LATE_GAME_ONLY,
-    HEDGE_PROMOTION_PNL_PCT,
-    HEDGE_PROMOTION_PRICE,
-    HEDGE_PROMOTION_DELTA,
-    ENTRY_GRACE_PERIOD,
-    INSTANT_EXIT_PRICE,
-    MAX_SPREAD_FOR_SL,
-    SL_CONFIRMATION_TICKS,
+    get_all_params,
 )
 from live.position_tracker import PositionTracker, MarketState, Trade
 from live.orderbook_feed import OrderbookTick
@@ -97,26 +62,34 @@ def _check_early_entry_eligible(
     current_price: float,
     market_progress: float,
     ts: datetime,
+    early_entry_min_progress: float,
+    early_entry_max_progress: float,
+    early_entry_price_threshold: float,
+    early_entry_max_volatility: float,
+    early_entry_max_range: float,
+    early_entry_min_duration_minutes: float,
+    early_entry_no_drop_threshold: float,
+    early_entry_no_drop_window: int,
 ) -> Tuple[bool, str]:
     """Check whether early entry conditions are met for a stable market."""
     if (
-        market_progress < EARLY_ENTRY_MIN_PROGRESS
-        or market_progress >= EARLY_ENTRY_MAX_PROGRESS
+        market_progress < early_entry_min_progress
+        or market_progress >= early_entry_max_progress
     ):
         return False, "outside_early_window"
-    if current_price < EARLY_ENTRY_PRICE_THRESHOLD:
+    if current_price < early_entry_price_threshold:
         return False, f"price_{current_price:.2f}_below_threshold"
     if len(price_history) < 20:
         return False, "insufficient_history"
 
-    progress_in_window = (market_progress - EARLY_ENTRY_MIN_PROGRESS) / (
-        EARLY_ENTRY_MAX_PROGRESS - EARLY_ENTRY_MIN_PROGRESS
+    progress_in_window = (market_progress - early_entry_min_progress) / (
+        early_entry_max_progress - early_entry_min_progress
     )
     relaxation = progress_in_window
 
-    adj_max_vol = EARLY_ENTRY_MAX_VOLATILITY * (1 + relaxation * 1.5)
-    adj_max_range = EARLY_ENTRY_MAX_RANGE * (1 + relaxation * 1.5)
-    adj_min_dur = EARLY_ENTRY_MIN_DURATION_MINUTES * (1 - relaxation * 0.6)
+    adj_max_vol = early_entry_max_volatility * (1 + relaxation * 1.5)
+    adj_max_range = early_entry_max_range * (1 + relaxation * 1.5)
+    adj_min_dur = early_entry_min_duration_minutes * (1 - relaxation * 0.6)
 
     metrics = _calculate_stability_metrics(price_history)
     if not metrics["valid"]:
@@ -136,11 +109,11 @@ def _check_early_entry_eligible(
             return False, f"duration_{duration_min:.1f}min"
 
     # No recent drop
-    cutoff = (ts - timedelta(seconds=EARLY_ENTRY_NO_DROP_WINDOW)).isoformat()
+    cutoff = (ts - timedelta(seconds=early_entry_no_drop_window)).isoformat()
     recent = [(t, p) for t, p in price_history if t >= cutoff]
     if len(recent) >= 2:
         recent_max = max(p for _, p in recent)
-        adj_drop = EARLY_ENTRY_NO_DROP_THRESHOLD * (1 + relaxation * 0.5)
+        adj_drop = early_entry_no_drop_threshold * (1 + relaxation * 0.5)
         if recent_max - current_price > adj_drop:
             return False, f"recent_drop_{recent_max - current_price:.3f}"
 
@@ -167,19 +140,78 @@ class LiveStrategy:
         trading_mode: str = "paper",
         market_assets: Dict[str, List[str]] = None,
     ):
+        """
+        Initialize the live strategy.
+        
+        Args:
+            tracker: Position tracker instance
+            order_manager: Order execution manager
+            params: Full parameter dict (use get_all_params() to build with overrides)
+            trading_mode: "paper" | "live" | "parquet"
+            market_assets: Dict mapping market_id -> [asset_ids]
+        """
         self.tracker = tracker
         self.order_mgr = order_manager
-        self.params = normalize_strategy_params(params)
         self.mode = trading_mode
         self.market_assets = market_assets or {}
 
-        # Extract frequently used params
+        # Get full params (merges with defaults)
+        self.params = get_all_params(params)
+
+        # Extract strategy params
         self.ENTRY = self.params["entry_threshold"]
         self.EXIT_SL = self.params["exit_stop_loss"]
         self.SL_PCT = self.params["stop_loss_pct"]
         self.TP_PCT = self.params["take_profit_pct"]
         self.COOLDOWN = self.params["cooldown_periods"]
-        self.GLOBAL_TP = tracker.initial_capital * GLOBAL_TP_PCT
+        
+        # Capital & risk
+        self.GLOBAL_TP = tracker.initial_capital * self.params["global_tp_pct"]
+        
+        # Trading window
+        self.LATE_GAME_THRESHOLD = self.params["late_game_threshold"]
+        self.LAST_MINUTES_ONLY = self.params["last_minutes_only"]
+        
+        # Early entry
+        self.EARLY_ENTRY_ENABLED = self.params["early_entry_enabled"]
+        self.EARLY_ENTRY_MIN_PROGRESS = self.params["early_entry_min_progress"]
+        self.EARLY_ENTRY_MAX_PROGRESS = self.params["early_entry_max_progress"]
+        self.EARLY_ENTRY_PRICE_THRESHOLD = self.params["early_entry_price_threshold"]
+        self.EARLY_ENTRY_MAX_VOLATILITY = self.params["early_entry_max_volatility"]
+        self.EARLY_ENTRY_MAX_RANGE = self.params["early_entry_max_range"]
+        self.EARLY_ENTRY_MIN_DURATION_MINUTES = self.params["early_entry_min_duration_minutes"]
+        self.EARLY_ENTRY_NO_DROP_THRESHOLD = self.params["early_entry_no_drop_threshold"]
+        self.EARLY_ENTRY_NO_DROP_WINDOW = self.params["early_entry_no_drop_window"]
+        
+        # Hedge
+        self.HEDGE_ENABLED = self.params["hedge_enabled"]
+        self.HEDGE_DROP_POINTS = self.params["hedge_drop_points"]
+        self.HEDGE_DROP_WINDOW = self.params["hedge_drop_window"]
+        self.HEDGE_DROP_FROM_ENTRY = self.params["hedge_drop_from_entry"]
+        self.HEDGE_AMOUNT = self.params["hedge_amount"]
+        self.HEDGE_LATE_GAME_ONLY = self.params["hedge_late_game_only"]
+        self.HEDGE_COOLDOWN_SECONDS = self.params["hedge_cooldown_seconds"]
+        self.HEDGE_DROP_CONFIRMATION_TICKS = self.params["hedge_drop_confirmation_ticks"]
+        self.HEDGE_EXIT_CONFIRMATION_TICKS = self.params["hedge_exit_confirmation_ticks"]
+        self.HEDGE_EXIT_DROP_POINTS = self.params["hedge_exit_drop_points"]
+        
+        # Panic flip
+        self.PANIC_FLIP_ENABLED = self.params["panic_flip_enabled"]
+        self.PANIC_FLIP_THRESHOLD = self.params["panic_flip_threshold"]
+        self.PANIC_FLIP_WINDOW = self.params["panic_flip_window"]
+        self.PANIC_FLIP_MIN_PRICE = self.params["panic_flip_min_price"]
+        self.PANIC_FLIP_LATE_GAME_ONLY = self.params["panic_flip_late_game_only"]
+        
+        # Hedge promotion
+        self.HEDGE_PROMOTION_PNL_PCT = self.params["hedge_promotion_pnl_pct"]
+        self.HEDGE_PROMOTION_PRICE = self.params["hedge_promotion_price"]
+        self.HEDGE_PROMOTION_DELTA = self.params["hedge_promotion_delta"]
+        
+        # Safety
+        self.ENTRY_GRACE_PERIOD = self.params["entry_grace_period"]
+        self.INSTANT_EXIT_PRICE = self.params["instant_exit_price"]
+        self.MAX_SPREAD_FOR_SL = self.params["max_spread_for_sl"]
+        self.SL_CONFIRMATION_TICKS = self.params["sl_confirmation_ticks"]
 
         self.DCA_TIERS = [
             ("entry", self.ENTRY, self.params["weight_entry"]),
@@ -242,7 +274,7 @@ class LiveStrategy:
 
         # Market progress
         market_progress = self._calc_progress(ms, ts)
-        in_late_game = market_progress >= LATE_GAME_THRESHOLD
+        in_late_game = market_progress >= self.LATE_GAME_THRESHOLD
 
         # Trading window
         in_trading_window = self._in_trading_window(ms, ts)
@@ -251,7 +283,7 @@ class LiveStrategy:
         in_grace_period = self._in_grace_period(ms, aid, ts)
 
         spread = best_ask - best_bid
-        tick_is_noisy = spread > MAX_SPREAD_FOR_SL
+        tick_is_noisy = spread > self.MAX_SPREAD_FOR_SL
 
         # ── GLOBAL P&L CHECK ──
         total_pnl = self.tracker.get_total_pnl()
@@ -260,8 +292,8 @@ class LiveStrategy:
             return
 
         # ── PANIC FLIP ──
-        if PANIC_FLIP_ENABLED and not ms.panic_flip_triggered and not ms.hit_99:
-            can_panic = not PANIC_FLIP_LATE_GAME_ONLY or in_late_game
+        if self.PANIC_FLIP_ENABLED and not ms.panic_flip_triggered and not ms.hit_99:
+            can_panic = not self.PANIC_FLIP_LATE_GAME_ONLY or in_late_game
             if can_panic:
                 await self._check_panic_flip(ms, mid, ts)
 
@@ -302,10 +334,18 @@ class LiveStrategy:
 
         # Early entry check
         allow_early = False
-        if EARLY_ENTRY_ENABLED and not in_trading_window and ms.active_asset is None:
+        if self.EARLY_ENTRY_ENABLED and not in_trading_window and ms.active_asset is None:
             long_hist = self.tracker.get_long_price_history(mid, aid)
             eligible, reason = _check_early_entry_eligible(
-                long_hist, current_price, market_progress, ts
+                long_hist, current_price, market_progress, ts,
+                self.EARLY_ENTRY_MIN_PROGRESS,
+                self.EARLY_ENTRY_MAX_PROGRESS,
+                self.EARLY_ENTRY_PRICE_THRESHOLD,
+                self.EARLY_ENTRY_MAX_VOLATILITY,
+                self.EARLY_ENTRY_MAX_RANGE,
+                self.EARLY_ENTRY_MIN_DURATION_MINUTES,
+                self.EARLY_ENTRY_NO_DROP_THRESHOLD,
+                self.EARLY_ENTRY_NO_DROP_WINDOW,
             )
             if eligible:
                 allow_early = True
@@ -478,6 +518,37 @@ class LiveStrategy:
 
         print("\n".join(lines), flush=True)
 
+    def print_status(self):
+        """Print a concise one-line status with position price info if present."""
+        total_pnl = self.tracker.get_total_pnl()
+        total_positions = sum(
+            sum(1 for p in ms.positions.values() if p.shares > 0)
+            for ms in self.tracker.markets.values()
+        )
+        
+        status_parts = [
+            f"ticks={self.tick_count:,}",
+            f"pnl=${total_pnl:+.2f}",
+            f"positions={total_positions}",
+        ]
+        
+        # If there's an active position, show its prices
+        if total_positions > 0:
+            for mid, ms in self.tracker.markets.items():
+                for aid, pos in ms.positions.items():
+                    if pos.shares > 0:
+                        cur_price = self.tracker.get_price(mid, aid)
+                        status_parts.append(
+                            f"[{ms.name or mid[:15]}] "
+                            f"bought@${pos.avg_price:.4f} "
+                            f"now@${cur_price:.4f}"
+                        )
+                        break  # just show first position for brevity
+                if total_positions > 0:  # found a position
+                    break
+        
+        logger.info(f"[STATUS] {' | '.join(status_parts)}")
+
     # ================================================================
     #  PRIVATE HELPERS
     # ================================================================
@@ -497,14 +568,14 @@ class LiveStrategy:
             return 0.5
 
     def _in_trading_window(self, ms: MarketState, ts: datetime) -> bool:
-        if LAST_MINUTES_ONLY is None:
+        if self.LAST_MINUTES_ONLY is None:
             return True
         if not ms.end_time:
             return True
         try:
             end = datetime.fromisoformat(ms.end_time)
             remaining = (end - ts).total_seconds()
-            return remaining <= (LAST_MINUTES_ONLY * 60)
+            return remaining <= (self.LAST_MINUTES_ONLY * 60)
         except Exception:
             return True
 
@@ -513,7 +584,7 @@ class LiveStrategy:
             return False
         try:
             entry_ts = datetime.fromisoformat(ms.last_entry_time[aid])
-            return (ts - entry_ts).total_seconds() < ENTRY_GRACE_PERIOD
+            return (ts - entry_ts).total_seconds() < self.ENTRY_GRACE_PERIOD
         except Exception:
             return False
 
@@ -577,16 +648,16 @@ class LiveStrategy:
             if len(hist) < 5:
                 continue
             check_price = self.tracker.get_price(mid, check_aid)
-            if check_price < PANIC_FLIP_MIN_PRICE:
+            if check_price < self.PANIC_FLIP_MIN_PRICE:
                 continue
 
             old_price = (
-                hist[-PANIC_FLIP_WINDOW][1]
-                if len(hist) >= PANIC_FLIP_WINDOW
+                hist[-self.PANIC_FLIP_WINDOW][1]
+                if len(hist) >= self.PANIC_FLIP_WINDOW
                 else hist[0][1]
             )
             surge = check_price - old_price
-            if surge < PANIC_FLIP_THRESHOLD:
+            if surge < self.PANIC_FLIP_THRESHOLD:
                 continue
 
             # Sell all losing positions
@@ -672,9 +743,9 @@ class LiveStrategy:
         hedge_avg = pos.cost / pos.shares
         hedge_drop = hedge_avg - self.tracker.get_price(mid, aid)
 
-        if hedge_drop >= HEDGE_EXIT_DROP_POINTS:
+        if hedge_drop >= self.HEDGE_EXIT_DROP_POINTS:
             ms.hedge_drop_confirm_count += 1
-            if ms.hedge_drop_confirm_count >= HEDGE_EXIT_CONFIRMATION_TICKS:
+            if ms.hedge_drop_confirm_count >= self.HEDGE_EXIT_CONFIRMATION_TICKS:
                 sold, proceeds, _ = self._exec_sell(
                     aid, pos.shares, bids, best_bid
                 )
@@ -725,18 +796,18 @@ class LiveStrategy:
         if ms.last_hedge_time:
             try:
                 last = datetime.fromisoformat(ms.last_hedge_time)
-                if (ts - last).total_seconds() < HEDGE_COOLDOWN_SECONDS:
+                if (ts - last).total_seconds() < self.HEDGE_COOLDOWN_SECONDS:
                     return
             except Exception:
                 pass
 
         can_hedge = (
-            HEDGE_ENABLED
+            self.HEDGE_ENABLED
             and not ms.hedge_asset
             and not ms.hit_99
             and not tick_is_noisy
         )
-        if HEDGE_LATE_GAME_ONLY and not in_late_game:
+        if self.HEDGE_LATE_GAME_ONLY and not in_late_game:
             can_hedge = False
         if not can_hedge:
             return
@@ -750,29 +821,29 @@ class LiveStrategy:
         # Fast drop
         hist = self.tracker.get_price_history(mid, aid)
         if len(hist) >= 2:
-            cutoff = (ts - timedelta(seconds=HEDGE_DROP_WINDOW)).isoformat()
+            cutoff = (ts - timedelta(seconds=self.HEDGE_DROP_WINDOW)).isoformat()
             old_prices = [(t, p) for t, p in hist if t <= cutoff]
             if old_prices:
                 old_price = old_prices[-1][1]
                 fast_drop = old_price - current_price
-                if fast_drop >= HEDGE_DROP_POINTS:
+                if fast_drop >= self.HEDGE_DROP_POINTS:
                     drop_detected = True
                     drop_reason = f"FAST_DROP_{fast_drop:.2f}"
 
         # Slow drop
         if not drop_detected:
             drop_from_entry = avg_entry - current_price
-            if drop_from_entry >= HEDGE_DROP_FROM_ENTRY:
+            if drop_from_entry >= self.HEDGE_DROP_FROM_ENTRY:
                 drop_detected = True
                 drop_reason = f"SLOW_DROP_{drop_from_entry:.2f}"
 
         if drop_detected:
             ms.main_drop_confirm_count += 1
-            if ms.main_drop_confirm_count >= HEDGE_DROP_CONFIRMATION_TICKS:
+            if ms.main_drop_confirm_count >= self.HEDGE_DROP_CONFIRMATION_TICKS:
                 opp_assets = [
                     a for a in self.market_assets.get(mid, []) if a != aid
                 ]
-                if opp_assets and ms.cash >= HEDGE_AMOUNT:
+                if opp_assets and ms.cash >= self.HEDGE_AMOUNT:
                     opp_aid = opp_assets[0]
                     opp_tick = self._latest_book.get(opp_aid)
                     if opp_tick:
@@ -838,13 +909,13 @@ class LiveStrategy:
         promote = False
         reason = None
 
-        if hedge_pnl >= HEDGE_PROMOTION_PNL_PCT * main_pos.cost:
+        if hedge_pnl >= self.HEDGE_PROMOTION_PNL_PCT * main_pos.cost:
             promote = True
             reason = f"HEDGE_PNL_{hedge_pnl:.2f}"
-        elif hedge_price >= HEDGE_PROMOTION_PRICE:
+        elif hedge_price >= self.HEDGE_PROMOTION_PRICE:
             promote = True
             reason = f"HEDGE_PRICE_{hedge_price:.2f}"
-        elif hedge_ret - main_ret >= HEDGE_PROMOTION_DELTA:
+        elif hedge_ret - main_ret >= self.HEDGE_PROMOTION_DELTA:
             promote = True
             reason = f"HEDGE_DELTA_{(hedge_ret - main_ret) * 100:.1f}%"
 
@@ -903,7 +974,7 @@ class LiveStrategy:
         has_hedge_now = ms.hedge_asset is not None
 
         # Instant exit at 0.99
-        if best_bid >= INSTANT_EXIT_PRICE:
+        if best_bid >= self.INSTANT_EXIT_PRICE:
             exit_reason = "EXIT_99"
             ms.hit_99 = True
 

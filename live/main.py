@@ -147,6 +147,7 @@ async def run(
             await asyncio.sleep(60)
             if shutdown_event.is_set():
                 break
+            strategy.print_status()  # concise one-liner with position prices
             strategy.print_dashboard(trigger="PERIODIC")
             stats = collector.get_stats()
             logger.info(

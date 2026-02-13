@@ -191,6 +191,98 @@ def load_markets() -> Dict:
         return json.load(f)
 
 
+def get_all_params(overrides: Optional[Dict] = None) -> Dict:
+    """
+    Get all trading parameters in a single dict (notebook-compatible format).
+    
+    Returns a dict with all parameters that can be overridden by passing
+    a dict like::
+    
+        my_params = {
+            'entry_threshold': 0.7412,
+            'exit_stop_loss': 0.5440,
+            'stop_loss_pct': 0.1354,
+            'take_profit_pct': 0.3406,
+            'cooldown_periods': 21,
+            'dca_tier_1': 0.7916,
+            'dca_tier_2': 0.8382,
+            'dca_tier_3': 0.8501,
+            'weight_entry': 0.1064,
+            'weight_tier_1': 0.3337,
+            'weight_tier_2': 0.2735,
+            'weight_tier_3': 0.2382,
+            # Add any other params you want to override
+        }
+        
+        params = get_all_params(my_params)
+    """
+    params = {
+        # Strategy params (DCA thresholds, weights)
+        **DEFAULT_STRATEGY_PARAMS,
+        
+        # Capital & risk
+        'initial_capital': INITIAL_CAPITAL,
+        'global_tp_pct': GLOBAL_TP_PCT,
+        
+        # Trading window
+        'late_game_threshold': LATE_GAME_THRESHOLD,
+        'last_minutes_only': LAST_MINUTES_ONLY,
+        
+        # Early entry
+        'early_entry_enabled': EARLY_ENTRY_ENABLED,
+        'early_entry_min_progress': EARLY_ENTRY_MIN_PROGRESS,
+        'early_entry_max_progress': EARLY_ENTRY_MAX_PROGRESS,
+        'early_entry_price_threshold': EARLY_ENTRY_PRICE_THRESHOLD,
+        'early_entry_max_volatility': EARLY_ENTRY_MAX_VOLATILITY,
+        'early_entry_max_range': EARLY_ENTRY_MAX_RANGE,
+        'early_entry_min_duration_minutes': EARLY_ENTRY_MIN_DURATION_MINUTES,
+        'early_entry_no_drop_threshold': EARLY_ENTRY_NO_DROP_THRESHOLD,
+        'early_entry_no_drop_window': EARLY_ENTRY_NO_DROP_WINDOW,
+        
+        # Hedge
+        'hedge_enabled': HEDGE_ENABLED,
+        'hedge_drop_points': HEDGE_DROP_POINTS,
+        'hedge_drop_window': HEDGE_DROP_WINDOW,
+        'hedge_drop_from_entry': HEDGE_DROP_FROM_ENTRY,
+        'hedge_amount': HEDGE_AMOUNT,
+        'hedge_late_game_only': HEDGE_LATE_GAME_ONLY,
+        'hedge_cooldown_seconds': HEDGE_COOLDOWN_SECONDS,
+        'hedge_drop_confirmation_ticks': HEDGE_DROP_CONFIRMATION_TICKS,
+        'hedge_exit_confirmation_ticks': HEDGE_EXIT_CONFIRMATION_TICKS,
+        'hedge_exit_drop_points': HEDGE_EXIT_DROP_POINTS,
+        
+        # Panic flip
+        'panic_flip_enabled': PANIC_FLIP_ENABLED,
+        'panic_flip_threshold': PANIC_FLIP_THRESHOLD,
+        'panic_flip_window': PANIC_FLIP_WINDOW,
+        'panic_flip_min_price': PANIC_FLIP_MIN_PRICE,
+        'panic_flip_late_game_only': PANIC_FLIP_LATE_GAME_ONLY,
+        
+        # Hedge promotion
+        'hedge_promotion_pnl_pct': HEDGE_PROMOTION_PNL_PCT,
+        'hedge_promotion_price': HEDGE_PROMOTION_PRICE,
+        'hedge_promotion_delta': HEDGE_PROMOTION_DELTA,
+        
+        # Safety
+        'entry_grace_period': ENTRY_GRACE_PERIOD,
+        'instant_exit_price': INSTANT_EXIT_PRICE,
+        'max_spread_for_sl': MAX_SPREAD_FOR_SL,
+        'sl_confirmation_ticks': SL_CONFIRMATION_TICKS,
+    }
+    
+    if overrides:
+        params.update(overrides)
+    
+    # Normalize weights
+    w_keys = ["weight_entry", "weight_tier_1", "weight_tier_2", "weight_tier_3"]
+    total = sum(params[k] for k in w_keys)
+    if total > 0:
+        for k in w_keys:
+            params[k] /= total
+    
+    return params
+
+
 def normalize_strategy_params(params: Optional[Dict] = None) -> Dict:
     """Normalize strategy parameters with defaults and weight normalisation."""
     p = DEFAULT_STRATEGY_PARAMS.copy()
