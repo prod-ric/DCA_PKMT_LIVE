@@ -1007,7 +1007,7 @@ class LiveStrategy:
                 if below_sl:
                     count = ms.sl_below_count.get(aid, 0) + 1
                     ms.sl_below_count[aid] = count
-                    if count >= SL_CONFIRMATION_TICKS:
+                    if count >= self.SL_CONFIRMATION_TICKS:
                         exit_reason = sl_type
                 else:
                     ms.sl_below_count[aid] = 0
